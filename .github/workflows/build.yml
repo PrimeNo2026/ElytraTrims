@@ -1,0 +1,82 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Projekt-Zip entpacken
+        run: |
+          if [ -f build.gradle.kts ]; then
+            echo "Projekt liegt direkt im Repository."
+            DIR="."
+          else
+            ZIP=""
+            for z in *.zip; do
+              if unzip -l "$z" 2>/dev/null | grep -q 'build.gradle.kts'; then
+                ZIP="$z"
+                break
+              fi
+            done
+            if [ -z "$ZIP" ]; then
+              echo "Keine Projekt-Zip im Repository gefunden (Zip mit build.gradle.kts)."
+              exit 1
+            fi
+            echo "Entpacke $ZIP"
+            mkdir -p _project
+            unzip -q "$ZIP" -d _project
+            DIR="$(dirname "$(find _project -name build.gradle.kts | head -n 1)")"
+          fi
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: current
+
+      - name: Paper-API-Version ermitteln
+        run: |
+          ALL=$(curl -fsSL https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/maven-metadata.xml \
+            | grep -oE '<version>26\.3([.-][^<]*)?</version>' | sed -e 's/<[^>]*>//g' || true)
+          VER=$(echo "$ALL" | grep -v -i snapshot | tail -n 1 || true)
+          if [ -z "$VER" ]; then
+            VER=$(echo "$ALL" | tail -n 1)
+          fi
+          echo "Gefundene Paper-API-Version: ${VER:-keine (Standard aus gradle.properties)}"
+          echo "PAPER_VERSION=$VER" >> "$GITHUB_ENV"
+
+      - name: Build JAR
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle build --no-daemon ${PAPER_VERSION:+-PpaperVersion=$PAPER_VERSION}
+
+      - name: Dateien sammeln
+        id: collect
+        run: |
+          mkdir -p out
+          cp "$PROJECT_DIR"/build/libs/*.jar out/
+          cd "$PROJECT_DIR/resourcepack"
+          zip -X -r "$GITHUB_WORKSPACE/out/ElytraTrims-ResourcePack.zip" .
+          echo "sha1=$(sha1sum "$GITHUB_WORKSPACE/out/ElytraTrims-ResourcePack.zip" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Release erstellen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: ElytraTrims v1.0.${{ github.run_number }}
+          body: |
+            Resource-Pack SHA1: ${{ steps.collect.outputs.sha1 }}
+          files: |
+            out/*
